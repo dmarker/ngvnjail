@@ -1,0 +1,299 @@
+#!/bin/sh
+#-
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# Copyright (c) 2025 David Marker <dave@freedave.net>
+# All rights reserved.
+# 
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+# 1. Redistributions of source code must retain the above copyright
+#    notice unmodified, this list of conditions, and the following
+#    disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+# 
+# THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+# ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+# OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+# HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+# LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+# OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+# SUCH DAMAGE.
+#
+
+# PROVIDE: ngvnjail
+# REQUIRE: FILESYSTEMS iovctl serial sppp sysctl
+# REQUIRE: hostid
+# BEFORE:  netif
+# KEYWORD: nojailvnet
+
+. /etc/rc.subr
+
+name="ngvnjail"
+desc="Netgraph setup for vnet jails"
+rcvar="${name}_enable"
+start_cmd="ngvnjail_start"
+stop_cmd="ngvnjail_stop"
+
+
+#
+# This is used to configure this system (host) with ng_bridge(4)s to use with
+# vnet(9) jails. Optionally attach ng_ether(4) to ng_bridge(4) to share a
+# physical network with jails. Optionally attach ng_eiface(4) to ng_bridge(4)
+# to create a shared (but private network) with the jails and the system.
+#
+# An ng_bridge(4) can have an ng_ether(4), which is just a netgraph node for a
+# physical network adapter, attached to it. This will allow jails connecting to
+# this same bridge the same network access as the host.
+# An ng_bridge(4) can instead have an ng_eiface(4) attached and configured on
+# the host to create a shared network the host is part of. If the host chooses
+# it can route or even packet filter using this ng_eiface(4).
+# Finally an ng_bridge(4) can be created that has no ng_ether(4) or ng_eiface(4)
+# configured on it. This is a private network just for the jails.
+#
+# Your jail.conf will need to know the names of the bridges and can then use
+# `ngctl` or `jexec jail ngctl` to create ng_eiface(4) in the jails that can
+# be connected to your bridges with ngportal(8).
+#
+# There are two types of bridge, normal and restrictive. In restrictive mode the
+# ng_bridge(4) only sends packets with unknown destination MAC addresses out
+# uplinks. This is only useful on a firewall that connects to your ISP where you
+# don't care about the unkown macs on "the other side".
+#
+# This means you have two lists of ng_bridge(4) names to provide, e.g.:
+#	ngbridge_normal="br0 br1 br2"
+#	ngbridge_restrictive="rbr0 rbr1"
+# 
+# This script needs to run before you configure interfaces, so while you can
+# still change their name in rc.conf, you have to use the driver name here. Each
+# physical interface, that is ng_ether(4), you want to attach to a bridge will
+# need an entry in your rc.conf(5) of the form `ngether_<if-name>` assigned
+# the bridge it is to connect with and optionally ETH or UPLNK options which
+# mean:
+#	ETH	connect only the ethernet not upper protocols.
+#		do not bother configuring such an interface
+#	UPLNK	instruct bridge not to learn MAC address from this interface.
+#		most useful for firewall on interface connected to ISP.
+#
+# Valid Examples
+#	ngether_em0="br0"
+#	ngether_em1="br1 ETH"
+#	ngether_em2="br2 UPLNK"
+#	ngether_em3="rbr0 ETH UPLNK"
+#
+# When you configure an interface (you didn't specify ETH) be sure to keep it in
+# promiscuous mode and follow best practices here:
+#	https://wiki.freebsd.org/Networking/10GbE/Router#Disabling_LRO_and_TSO
+#
+# There is nothing about this script that requires you to use ng_wormhole(4) or
+# any other particular netgraph(4) methodology. It's here for initial bridges
+# some of which may need a physical interface and to provide eiface to system.
+#
+# Valid Examples:
+#	ngeiface_lan0="br0 50:9D:F0:EB:F0:F9"
+#	ngeiface_jail0="br1"
+#
+# NOTE: Yes I put braces around most everything, its easier (for me) to see
+#       if the required ':' for ngctl is missing or not that way.
+#
+
+IFCONFIG=/sbin/ifconfig
+NGCTL=/usr/sbin/ngctl
+SED=/usr/bin/sed
+
+# By passing "uplink" as second arg you create the bridge in "restrictive" mode.
+# That means unknown macs only go out "uplinks".
+mkbridge()
+{
+	local brname=${1}
+	local connect=${2:-link}
+
+	${NGCTL} -f- <<- EOF >/dev/null
+		mkpeer .: bridge b ${connect}
+		name .:b ${brname}
+		msg ${brname}: setpersistent
+		disconnect .: b
+	EOF
+}
+
+rmbridge()
+{
+	local brname=${1}
+
+	${NGCTL} shutdown ${brname}: >/dev/null
+}
+
+# These are for the system not a jail which is why we can just use `ngctl`
+# mkeiface bridge-lan lan0 1E:F3:8E:FE:AE:AF
+mkeiface()
+{
+	local brname=${1}
+	local ifname=${2}
+	local mac=${3} # optional
+	local name
+
+	# While you could just create is connected to `${brname}:link` you
+	# don't know what `link` was chosen and then couldn't rename the
+	# ng_eiface(8).
+	${NGCTL} -f- <<- EOF >/dev/null
+		mkpeer .: eiface e ether
+		name .:e ${ifname}
+		disconnect .: e
+		join ${ifname}: ${brname}: ether link
+	EOF
+	if [ $# -gt 2 ]; then
+		${NGCTL} msg ${ifname}: set "${mac}" >/dev/null
+	fi
+
+	# need to find out its interface and change that too.
+	IFS='"' read _ name <<- EOF
+	$(${NGCTL} msg ${ifname}: getifname | ${SED} '1d')
+	EOF
+
+	# and now make the name match for ifconfig(8)
+	${IFCONFIG} ${name} name ${ifname}
+}
+
+rmeiface()
+{
+	local ifname=${1}
+	${NGCTL} shutdown ${ifname}: >/dev/null
+}
+
+# Used to connect upper and lower hooks of an ng_ether to a bridge. The
+# interface should still be configured by the system
+# The optional third argument should be "link" or "uplink". The difference is
+# "uplink" hoooks tell the bridge not to learn MACs from that link.
+link2_ether()
+{
+	local brname=$1
+	local ifname=$2
+	local connect=${3:-link}
+
+	# ifconfig(8) options may change when configured, but users were warned.
+	${NGCTL} -f- <<- EOF >/dev/null && ifcfg ${ifname}
+		connect ${ifname}: ${brname}: upper link
+		connect ${ifname}: ${brname}: lower ${connect}
+		msg ${ifname}: setpromisc 1
+		msg ${ifname}: setautosrc 0
+	EOF
+}
+
+# Used to connect only the lower hook of an ng_ether to a bridge. The interface
+# should NOT be configured with IP addresses at all.
+# Same optional third argument as link2_ether.
+link1_ether()
+{
+	local brname=$1
+	local ifname=$2
+	local connect=${3:-link}
+
+	${NGCTL} -f- <<- EOF >/dev/null && ifcfg ${ifname}
+		connect ${ifname}: ${brname}: lower ${connect}
+		msg ${ifname}: setpromisc 1
+		msg ${ifname}: setautosrc 0
+	EOF
+}
+
+# This will disconnect upper and lower which is allowed even if not connected.
+unlink_ether()
+{
+	local ifname=$1
+
+	${NGCTL} -f- <<- EOF >/dev/null
+		disconnect ${ifname}: upper
+		disconnect ${ifname}: lower
+	EOF
+}
+
+ifcfg()
+{
+	local ifname=${1}
+	# https://wiki.freebsd.org/Networking/10GbE/Router#Disabling_LRO_and_TSO
+	${IFCONFIG} ${ifname} -tso4 -tso6 -lro -vlanhwtso promisc up >/dev/null
+}
+
+ngvnjail_start()
+{
+	# Important to create bridges first
+	for bridge in $ngbridge_normal; do
+		mkbridge $bridge ||
+			echo "ngvnjail: failed to create bridge ${bridge}" >&2
+	done
+	for bridge in $ngbridge_restrictive; do
+		mkbridge $bridge uplink ||
+			echo "ngvnjail: failed to create bridge ${bridge}" >&2
+	done
+	
+	# try and connect all the physical interfaces
+	for iface in `list_vars ngether_*`; do
+		ifname="${iface##ngether_}"
+		#eval args=\"\$$iface\"
+		args=$(eval echo \$${iface})
+		brname=${args%% *}
+		if [ -z ${brname} ]; then
+			echo "ngvnjail: \"${iface}\": missing bridge" >&2
+			continue  # without bridge nothing to do
+		fi
+
+		fn=link2_ether
+		connect="link"
+		for opt in ${args#* }; do
+			if [ $opt == "ETH" ]; then
+				fn=link1_ether
+			fi
+			if [ $opt == "UPLNK" ]; then
+				connect="uplink"
+			fi
+		done
+		$fn $brname $ifname $connect ||
+			echo "ngvnjail: failed to link \"${iface}\" <-> \"${brname}\"" >&2
+	done
+
+	# try and connect all the logical interfaces.
+	for eiface in `list_vars ngeiface_*`
+	do
+		eifname="${eiface##ngeiface_}"
+		args=$(eval echo \$${eiface})
+		brname="${args%% *}"
+		mac="${args##* }"  # optional
+
+		if [ -z ${brname} ]; then
+			echo "ngvnjail: \"${eiface}\": missing bridge" >&2
+		fi
+		mkeiface ${brname} ${eifname} ${mac} ||
+			echo "ngvnjail: failed to create \"${eifname}\"" >&2
+	done
+}
+
+ngvnjail_stop()
+{
+	# Order doesn't actually matter. But for sake of symmetry do in reverse
+	for eiface in `list_vars ngeiface_*`; do
+		eifname="${eiface##ngeiface_}"
+		rmeiface ${eifname} ||
+			echo "ngvnjail: failed to destroy \"${eifname}\"" >&2
+	done
+
+	for iface in `list_vars ngether_*`; do
+		ifname="${iface##ngether_}"
+		unlink_ether ${ifname} ||
+			echo "ngvnjail: failed to unlink \"${ifname}\"" >&2
+	done
+
+	for bridge in $ngbridge_restrictive $ngbridge_normal; do
+		rmbridge $bridge ||
+			echo "ngvnjail: failed to destroy \"${bridge}\"" >&2
+	done
+}
+
+
+load_rc_config $name
+run_rc_command $*
