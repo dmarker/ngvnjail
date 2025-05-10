@@ -31,10 +31,10 @@
 
 # ngvnjail
 
-This is literally just a script I drop into `/usr/local/etc/rc.d` for
-[rc.conf(5)][31]. This allows me to configure a couple [ng_bridge(4)][32] and
-add my network interface (as [ng_ether(4)][33]) and [ng_eiface(4)][34] to the
-bridges at startup.
+This is literally just a [script](ngvnjail) I drop into `/usr/local/etc/rc.d` for
+[rc.conf(5)][31] and a [script](mkeiface.sh) I drop into `/etc/jail.conf.d/script`.
+This allows me to configure a couple [ng_bridge(4)][32] and add my network interface
+(as [ng_ether(4)][33]) and [ng_eiface(4)][34] to the bridges at startup.
 
 Using this along with the following reviews (most not in FreeBSD):
 * changes to [ng_bridge][23] to allow `link` and `uplink` without numbers.
@@ -47,8 +47,8 @@ I also backport all of that and one additional patch to run with FreeBSD14:
 
 That last fix was required because of my `link` change for [ng_bridge(4)][32].
 
-I mean you can still use this without those for setting things up on your system,
-but for the jails configuration and usage you need them all.
+I mean you can still use [ngvnjail](njvnjail) without those for setting things up
+on your system, but for the jails configuration and usage you need them all.
 
 Speaking of config...
 
@@ -68,6 +68,8 @@ Technically its just the [ng_ether(4)][33] that you need in here but don't forge
 [ngctl(8)][20], even with my changes, can't load kernel modules in a jail! So its probably
 best to load what you plan to use.
 
+Alternately you can just compile things into the kernel.
+
 # Using with rc.conf and jail.conf
 
 Using the `ngvnjail` script you minimaly need somegthing like this in your rc.conf:
@@ -86,39 +88,19 @@ ngeiface_jail0="br1"
 # configure ifconfig_lan0="..." and ifconfig_jail0="..." as normal.
 ```
 
-Here is what you can have in jail.conf to create a `lan0` and `jail0` interface
-for any jail that may want those. If you don't like using the same names
-you can change to `lan0$name` and `jail0$name`.
-Since wormholes disappear when either end is shutdown (like when a jail is
-shut down) you don't need to name them but I do so you can tell at a glance
-any particular wormhole's purpose.
-```
-# This creates an ng_eiface(4) named "lan0" in the jail "$name". The network
-# interface is changed to "lan0" as well. Finally this ng_eiface(4) in the
-# jail is connected to "br0" on the system with ngportal (that sets up an
-# ng_wormhole(4) for the connection.
-$lanif="echo -e \"mkpeer eiface e ether\nname .:e lan0\" | ngctl -j $name -f -
-ifn=`ngctl -j $name msg lan0: getifname | sed '1d' | cut -d\\\" -f2`
-ifconfig -j $name \$ifn name lan0
-ngportal :br0$name:br0:link $name:lan0system:lan0:ether";
-
-# same but for a private network on br1
-$jailif="echo -e \"mkpeer eiface e ether\nname .:e jail0\" | ngctl -j $name -f -
-ifn=`ngctl -j $name msg jail0: getifname | sed '1d' | cut -d \\\" -f2`
-ifconfig -j $name \$ifn name jail0
-ngportal :br1$name:br1:link $name:jail0system:jail0:ether";
-```
-
-Now for each jail you minimally need something similar to:
+Now in each jail you want to connect interfaces you can use something like this:
 ```
 jailname {
   vnet;
-  exec.created += "$lanif";
   # you don't want to just use the default on something connected to an
   # ng_bridge(4) connected to ng_ether(4). So set mac different for
   # each jail's "lan0".
-  exec.created += "ngctl -j $name msg lan0: set 00:15:5d:01:11:31";
-  exec.created += "$jailif";
+  exec.created += "/etc/jail.conf.d/script/mkeiface.sh $name lan0 00:15:5d:01:11:31";
+  exec.created += "ngportal :br0$name:br0:link $name:lan0system:lan0:ether";
+
+  exec.created += "/etc/jail.conf.d/script/mkeiface.sh $name jail0";
+  exec.created += "ngportal :br1$name:br1:link $name:jail0system:jail0:ether";
+  
   exec.start = "/bin/sh /etc/rc";
   exec.stop = "/bin/sh /etc/rc.shutdown jail";
 }
@@ -129,7 +111,7 @@ but before its started. Because it was created in the jail, the [ng_eiface(4)][3
 ng_wormhole(4) connected to it go away when the jail does. And when the side of
 the wormhole in the jail shuts down, it shuts down the side on the system.
 
-With just three lines you add access to your physical network and a private jail
+With just four lines you add access to your physical network and a private jail
 network. Very template friendly.
 
 I do like using the same name for interfaces in jails so they can all share
