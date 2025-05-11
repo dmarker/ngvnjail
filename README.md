@@ -88,19 +88,30 @@ ngeiface_jail0="br1"
 # configure ifconfig_lan0="..." and ifconfig_jail0="..." as normal.
 ```
 
+I like to define the possibilities in /etc/jail.conf like this:
+```
+# define interfaces for our jails. each jail can have the same interface names
+# but change `lan0` to `lan0name` if you don't like that.
+# Also don't forget that lan0 needs a MAC added.
+$lan0="/etc/jail.conf.d/script/mkeiface.sh $name lan0";
+$jail0="/etc/jail.conf.d/script/mkeiface.sh $name jail0";
+
+# define the bridges for our networks
+$br0lan="ngportal :br0$name:br0:link $name:lan0system:lan0:ether";
+$br1jail="ngportal :br1$name:br1:link $name:jail0system:jail0:ether";
+```
+
 Now in each jail you want to connect interfaces you can use something like this:
 ```
 jailname {
   vnet;
-  # you don't want to just use the default on something connected to an
-  # ng_bridge(4) connected to ng_ether(4). So set mac different for
-  # each jail's "lan0".
-  exec.created += "/etc/jail.conf.d/script/mkeiface.sh $name lan0 00:15:5d:01:11:31";
-  exec.created += "ngportal :br0$name:br0:link $name:lan0system:lan0:ether";
+  # create interfaces $lan0 and $jail0
+  exec.created += "$lan0 00:15:5d:01:11:31";
+  exec.created += "$jail0";
+  # attach interfaces to bridges.
+  exec.created += "$br0lan";
+  exec.created += "$br1jail";
 
-  exec.created += "/etc/jail.conf.d/script/mkeiface.sh $name jail0";
-  exec.created += "ngportal :br1$name:br1:link $name:jail0system:jail0:ether";
-  
   exec.start = "/bin/sh /etc/rc";
   exec.stop = "/bin/sh /etc/rc.shutdown jail";
 }

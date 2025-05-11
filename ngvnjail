@@ -139,7 +139,7 @@ mkeiface()
 	local mac=${3} # optional
 	local name
 
-	# While you could just create is connected to `${brname}:link` you
+	# While you could just create it connected to `${brname}:link` you
 	# don't know what `link` was chosen and then couldn't rename the
 	# ng_eiface(8).
 	${NGCTL} -f- <<- EOF >/dev/null
