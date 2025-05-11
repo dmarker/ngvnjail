@@ -72,7 +72,7 @@ Alternately you can just compile things into the kernel.
 
 # Using with rc.conf and jail.conf
 
-Using the `ngvnjail` script you minimaly need somegthing like this in your rc.conf:
+Using the `ngvnjail` script you minimaly need something like this in your rc.conf:
 ```
 ngvnjail_enable="YES"
 ngbridge_normal="br0 br1"
@@ -116,6 +116,10 @@ jailname {
   exec.stop = "/bin/sh /etc/rc.shutdown jail";
 }
 ```
+
+While `$lan0` requires `$br0lan` and `$jail0` requires `$br1jail`, you are not
+requied to connect a jail to both networks. For example I usually don't give
+a database jail access beyond `$jail0` with `$br1jail`.
 
 That is it. You create the [ng_eiface(4)][34] in the jail after the jail is created
 but before its started. Because it was created in the jail, the [ng_eiface(4)][34] and
